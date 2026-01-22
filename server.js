@@ -9,22 +9,17 @@ const IORedis = require('ioredis');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Redis Bağlantısı (Sıra sistemi için şart)
-// Render'da REDIS_URL environment variable olarak verilecek
 const connection = new IORedis(process.env.REDIS_URL, {
     maxRetriesPerRequest: null 
 });
 
-// İş Kuyruğu Oluştur
 const tryonQueue = new Queue('tryon-queue', { connection });
 
 app.use(cors({ origin: '*' })); 
 app.use(express.json());
 
-// Fotoğraf Yükleme Ayarı
 const upload = multer({ storage: multer.memoryStorage() });
 
-// 1. İSTEK KARŞILAMA
 app.post('/api/queue-tryon', upload.single('userImage'), async (req, res) => {
     try {
         const { dressImageUrl } = req.body;
@@ -41,24 +36,36 @@ app.post('/api/queue-tryon', upload.single('userImage'), async (req, res) => {
     }
 });
 
-// 2. İŞLEYİCİ (Worker)
+// GÜNCELLENMİŞ WORKER (SEGMIND İÇİN)
 const worker = new Worker('tryon-queue', async (job) => {
     const { userImageBase64, dressImageUrl } = job.data;
-    const response = await axios.post('https://api.fashn.ai/v1/run', {
-        model_image: userImageBase64,
-        garment_image: dressImageUrl,
+    
+    // Gelinlik URL ise Base64'e çevir
+    let dressBase64 = dressImageUrl;
+    if (dressImageUrl.startsWith('http')) {
+        const imgRes = await axios.get(dressImageUrl, { responseType: 'arraybuffer' });
+        dressBase64 = Buffer.from(imgRes.data).toString('base64');
+    }
+
+    // Segmind API
+    const response = await axios.post('https://api.segmind.com/v1/idm-vton', {
         category: 'dresses',
+        garment_img: dressBase64,
+        human_img: userImageBase64,
+        garment_des: "wedding dress",
         nsfw_filter: true
     }, {
-        headers: { 
-            'Authorization': `Bearer ${process.env.FASHN_API_KEY}`,
-            'Content-Type': 'application/json'
-        }
+        headers: { 'x-api-key': process.env.SEGMIND_API_KEY },
+        responseType: 'arraybuffer' // Resim verisi olarak alacağız
     });
-    return response.data;
+
+    // Gelen binary veriyi Base64 URL'e çevir
+    const base64Image = Buffer.from(response.data, 'binary').toString('base64');
+    const finalUrl = `data:image/jpeg;base64,${base64Image}`;
+
+    return { output: [finalUrl] };
 }, { connection });
 
-// 3. DURUM SORGULAMA
 app.get('/api/status/:jobId', async (req, res) => {
     const job = await tryonQueue.getJob(req.params.jobId);
     if (!job) return res.status(404).json({ state: 'not_found' });
